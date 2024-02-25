@@ -1,0 +1,326 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Document</title>
+  </head>
+  <body style="background-color: black">
+    <script>
+      class StateMachine {
+        constructor(schema) {
+          this.validateSchema(schema);
+          this.schema = schema;
+          this.state = schema.initialState;
+          this.debug = false;
+          this.debugId = null;
+        }
+
+        static priority = {
+          default: -1,
+          out: 0,
+          in: 1,
+        };
+
+        static getPriority(key) {
+          if (key in StateMachine.priority) {
+            return StateMachine.priority[key];
+          }
+          return StateMachine.priority.default;
+        }
+
+        static isObject(value) {
+          return value && typeof value === "object";
+        }
+
+        static isFunction(value) {
+          return typeof value === "object";
+        }
+
+        static isInOut(value) {
+          return ["in", "out"].includes(value);
+        }
+
+        static getDeep(object, path) {
+          const pathArray = Array.isArray(path)
+            ? path
+            : path.split(".").filter(Boolean);
+          const value = pathArray.reduce((acc, key) => acc && acc[key], object);
+
+          return value;
+        }
+
+        static setDeep(object, path, value) {
+          const pathArray = Array.isArray(path)
+            ? path
+            : path.split(".").filter(Boolean);
+          pathArray.reduce((acc, key, index) => {
+            const isNextKeyNumeric = /^\d+$/.test(pathArray[index + 1]);
+
+            if (index === pathArray.length - 1) {
+              acc[key] = value;
+            } else if (!acc[key] || !StateMachine.isObject(acc[key])) {
+              // non-object intermediate path items are overwritten
+              acc[key] = isNextKeyNumeric ? [] : {};
+            }
+
+            return acc[key];
+          }, object);
+
+          return object;
+        }
+
+        setDebug(isDebug, debugId) {
+          this.debug = isDebug;
+          this.debugId = debugId || Math.random().toString(16).slice(2, 6);
+
+          return this;
+        }
+
+        logDebug(...args) {
+          if (!this.debug) {
+            return;
+          }
+          console.debug(`[${this.debugId}]`, ...args);
+        }
+
+        validateSchema(schema) {
+          // TODO: make actual validation when finilazing class
+          if (!schema || !StateMachine.isObject(schema)) {
+            throw new Error("state machine received invalid schema", {
+              cause: schema,
+            });
+          }
+        }
+
+        getStateConfig(state) {
+          if (StateMachine.isObject(this.schema[state])) {
+            return this.schema[state];
+          }
+          this.logDebug(`no state config for state: ${state}`);
+          return {};
+        }
+
+        getStateEvents(state) {
+          const config = this.getStateConfig(state);
+          if (StateMachine.isObject(config.events)) {
+            return config.events;
+          }
+          this.logDebug(`no state events for state: ${state}`);
+          return [];
+        }
+
+        getState() {
+          return {
+            state: this.state,
+          };
+        }
+
+        requestResult(isChanged) {
+          const result = {
+            changed: isChanged,
+            state: this.state,
+          };
+          this.logDebug(`request result is "${JSON.stringify(result)}"`);
+          return result;
+        }
+
+        requestState(eventName) {
+          this.logDebug(`requested state change on event "${eventName}"`);
+
+          // get events supported by state
+          const events = this.getStateEvents(this.state);
+          const event = events[eventName];
+
+          // check if event is predefined
+          if (!this.isEventValid(event)) {
+            // state is not changed
+            this.logDebug(
+              `event "${eventName}" is invalid; state "${this.state}" was not changed`
+            );
+            return this.requestResult(false);
+          }
+
+          this.state = this.receiveState(event);
+
+          // state changed
+          return this.requestResult(true);
+        }
+
+        getStateInOutHandler(state, direction) {
+          const config = this.getStateConfig(state);
+
+          if (
+            StateMachine.isInOut(direction) &&
+            StateMachine.isObject(config.io) &&
+            StateMachine.isFunction(config.io[direction])
+          ) {
+            return config.io[direction];
+          }
+          this.logDebug(`no "${direction}" handler for state "${state}"`);
+          return null;
+        }
+
+        isEventValid(event) {
+          const result =
+            StateMachine.isObject(event) &&
+            this.getEventState(event) &&
+            this.getEventHandlers(event);
+          return result;
+        }
+
+        getEventState(event) {
+          return event.state;
+        }
+
+        getEventHandlers(event) {
+          if (event.handlers && Array.isArray(event.handlers)) {
+            return event.handlers;
+          }
+          return null;
+        }
+
+        receiveState(event) {
+          const state = this.getEventState(event);
+          // by default -1 priority
+          const eventHandlers = this.getEventHandlers(event);
+          // by default -0 priority
+          const currentStateOutHandler = this.getStateInOutHandler(
+            this.state,
+            "out"
+          );
+          // by default 1 priority
+          const nextStateInHandler = this.getStateInOutHandler(state, "in");
+
+          const handlers = [
+            eventHandlers,
+            currentStateOutHandler,
+            nextStateInHandler,
+          ]
+            .reduce((acc, next) => {
+              if (!next) {
+                return acc;
+              }
+              if (Array.isArray(next)) {
+                acc.push(...next);
+              } else {
+                acc.push(next);
+              }
+              return acc;
+            }, [])
+            // sort in order of ascending priority
+            .sort((a, b) => a.priority - b.priority);
+
+          this.logDebug(`state "${state}" has handlers:`, handlers);
+
+          handlers.forEach((handler) => {
+            handler.callback();
+          });
+
+          return state;
+        }
+
+        setStateInOutHandler(state, direction, callback, comment, priority) {
+          const errors = [];
+          if (!StateMachine.isInOut(direction)) {
+            errors.push(`direction "${direction}" for state is invalid`);
+          }
+          if (!StateMachine.isFunction(callback)) {
+            errors.push(`callback "${callback}" for state is invalid`);
+          }
+
+          if (errors.length) {
+            errors.forEach(this.logDebug);
+            return;
+          }
+
+          const commentNormalized = comment || `${state}-${direction}`;
+          const priorityNormalized =
+            typeof priority === "number"
+              ? priority
+              : StateMachine.getPriority(direction);
+
+          this.schema;
+        }
+      }
+
+      const schema = {
+        initialState: "off",
+        off: {
+          io: {
+            out: {
+              callback: () => {
+                console.log("off: onExit");
+              },
+              comment: "off-out",
+              priority: 0,
+            },
+            in: {
+              callback: () => {
+                console.log("off: onEnter");
+              },
+              comment: "off-in",
+              priority: 1,
+            },
+          },
+          events: {
+            switch: {
+              state: "on",
+              handlers: [
+                {
+                  callback: () => {
+                    console.log(
+                      'transition action for "switch" in "off" state'
+                    );
+                  },
+                  comment: "off-switch-in",
+                  priority: -1,
+                },
+              ],
+            },
+          },
+        },
+        on: {
+          io: {
+            out: {
+              callback: () => {
+                console.log("on: onExit");
+              },
+              comment: "on-out",
+              priority: 0,
+            },
+            in: {
+              callback: () => {
+                console.log("on: onEnter");
+              },
+              comment: "on-in",
+              priority: 1,
+            },
+          },
+          events: {
+            switch: {
+              state: "off",
+              handlers: [
+                {
+                  callback: () => {
+                    console.log('transition action for "switch" in "on" state');
+                  },
+                  comment: "on-switch-off",
+                  priority: -1,
+                },
+              ],
+            },
+          },
+        },
+      };
+
+      const machine = new StateMachine(schema).setDebug(1, "TEST");
+      let result = machine.getState();
+      console.log(`current state: ${result.state}`);
+      result = machine.requestState("switch");
+      console.log(`current state: ${result.state}`);
+      result = machine.requestState("switch");
+      console.log(`current state: ${result.state}`);
+    </script>
+  </body>
+</html>

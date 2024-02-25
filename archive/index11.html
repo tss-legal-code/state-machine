@@ -1,0 +1,283 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Document</title>
+  </head>
+  <body style="background-color: black">
+    <script>
+      class StateMachine {
+        constructor(options = {}) {
+          const {
+            schema = {},
+            name = Math.random().toString(16).slice(2, 6),
+            state = "idle",
+            debug = false,
+          } = options;
+          this.schema = schema;
+          this.name = name;
+          this.state = state;
+          this.stateLog = [this.state];
+          this.debug = debug;
+          //
+          this.logDebug = this.debugLog.bind(this);
+          this.essentialEvents = {
+            in: "in",
+            out: "out",
+          };
+          this.handlersKey = "handlers";
+          this.eventPriorityMap = {
+            default: -1,
+            out: 0,
+            in: 1,
+          };
+        }
+
+        getPriority(eventName) {
+          if (eventName in this.eventPriorityMap) {
+            return this.eventPriorityMap[eventName];
+          }
+          return this.eventPriorityMap.default;
+        }
+
+        addStateHandler(state, transition, callback, options = {}) {
+          const { comment, priority, state: nextState } = options;
+
+          const commentNormalized = comment || `${state}-${transition}`;
+
+          const priorityNormalized = priority || this.getPriority(transition);
+
+          const transitionNormalized =
+            transition in this.essentialEvents
+              ? this.essentialEvents[transition]
+              : transition;
+
+          const currentlyDefinedState = this.getDeep({
+            target: this.schema,
+            path: [state, transitionNormalized, "state"],
+          });
+
+          let nextStateNormalized = state;
+          if (nextState) {
+            nextStateNormalized = nextState;
+          } else if (currentlyDefinedState) {
+            nextStateNormalized = currentlyDefinedState;
+          }
+
+          // compose new handler item
+          const handlerItem = {
+            callback,
+            state: nextStateNormalized,
+            comment: commentNormalized,
+            priority: priorityNormalized,
+          };
+
+          if (nextState) {
+            this.setDeep({
+              target: this.schema,
+              path: [state, transitionNormalized, "state"],
+              value: nextState,
+            });
+          } else {
+          }
+
+          // get existing array of handlers
+          const handlers = this.getDeep({
+            target: this.schema,
+            path: [state, transitionNormalized, this.handlersKey],
+          });
+
+          if (handlers) {
+            // add handler to existing array
+            handlers.push(handlerItem);
+          } else {
+            // create array of handlers with 1 item
+            this.setDeep({
+              target: this.schema,
+              path: [state, transitionNormalized, this.handlersKey],
+              value: [handlerItem],
+            });
+          }
+        }
+
+        emitEvent(eventName) {
+          this.debugLog(
+            `requested state change on transition name "${eventName}"`
+          );
+
+          if (eventName in this.essentialEvents) {
+            this.debugLog(
+              `transition "${eventName}" is internal and can not be triggered directly; state "${this.state}" was not changed`
+            );
+
+            return this.state;
+          }
+
+          // get config supported by state
+          const eventConfig = this.getDeep({
+            target: this.schema,
+            path: [this.state, eventName],
+          });
+
+          // check if event is defined
+          if (!eventConfig) {
+            // state is not changed
+            this.debugLog(
+              `event "${eventName}" is invalid; state "${this.state}" was not changed`
+            );
+            return this.state;
+          }
+
+          this.state = this.receiveState(eventConfig);
+          this.stateLog.push(this.state);
+
+          // state changed
+          this.debugLog(
+            `state changed from "${this.getPreviousState()}" to "${this.state}"`
+          );
+          return this.state;
+        }
+
+        getPreviousState() {
+          return this.stateLog[this.stateLog.length - 2];
+        }
+
+        receiveState(transition) {
+          const {
+            state: nextState,
+            // by default -1 priority
+            handlers: transitionHandlers,
+          } = transition;
+          const { state: currentState } = this;
+
+          // by default -0 priority
+          const currentStateOutHandler = this.getDeep({
+            target: this.schema,
+            path: [currentState, this.essentialEvents.out, this.handlersKey],
+            fallback: [],
+          });
+
+          // by default 1 priority
+          const nextStateInHandler = this.getDeep({
+            target: this.schema,
+            path: [nextState, this.essentialEvents.in, this.handlersKey],
+            fallback: [],
+          });
+
+          const handlers = [
+            transitionHandlers,
+            currentStateOutHandler,
+            nextStateInHandler,
+          ]
+            .reduce((acc, next) => {
+              if (!next) {
+                return acc;
+              }
+              acc.push(...next);
+              return acc;
+            }, [])
+            // sort in order of ascending of priority
+            .sort((a, b) => a.priority - b.priority);
+
+          this.debugLog(`state "${nextState}" has handlers:`, handlers);
+
+          handlers.forEach((handler) => {
+            handler.callback();
+          });
+
+          return nextState;
+        }
+
+        debugLog(...args) {
+          if (!this.debug) return;
+          console.debug(`[${this.name}]`, ...args);
+        }
+
+        getDeep(options = {}) {
+          const { target, path, fallback } = options;
+          const pathArray = Array.isArray(path)
+            ? path
+            : path.split(".").filter(Boolean);
+          const value = pathArray.reduce((acc, key) => acc && acc[key], target);
+
+          if (value === undefined && "fallback" in options) {
+            return fallback;
+          }
+          return value;
+        }
+
+        setDeep(options = {}) {
+          const { target, path, value } = options;
+          const pathArray = Array.isArray(path)
+            ? path
+            : path.split(".").filter(Boolean);
+          pathArray.reduce((acc, key, index) => {
+            const isNextKeyNumeric = /^\d+$/.test(pathArray[index + 1]);
+
+            if (index === pathArray.length - 1) {
+              acc[key] = value;
+            } else if (!acc[key] || typeof acc[key] !== "object") {
+              // non-object intermediate path items are overwritten
+              acc[key] = isNextKeyNumeric ? [] : {};
+            }
+
+            return acc[key];
+          }, target);
+
+          return target;
+        }
+      }
+
+      const schema = {
+        initialState: "off",
+      };
+
+      const machine = new StateMachine({
+        state: "off",
+        name: "FIRST",
+        debug: 1,
+      });
+
+      machine.addStateHandler("off", "in", () => {
+        console.log("off: onEnter");
+      });
+      machine.addStateHandler("off", "out", () => {
+        console.log("off: onExit");
+      });
+
+      machine.addStateHandler(
+        "off",
+        "switch",
+        () => {
+          console.log('transition action for "switch" in "off" state');
+        },
+        { comment: "off-switch-on", state: "on" }
+      );
+
+      machine.addStateHandler("on", "in", () => {
+        console.log("on: onEnter");
+      });
+      machine.addStateHandler("on", "out", () => {
+        console.log("on: onExit");
+      });
+
+      machine.addStateHandler(
+        "on",
+        "switch",
+        () => {
+          console.log('transition action for "switch" in "on" state');
+        },
+        { comment: "on-switch-off", state: "invalid" }
+      );
+
+      let result = machine.state;
+      console.log(`current state: ${JSON.stringify(result)}`);
+      result = machine.emitEvent("switch");
+      console.log(`current state: ${JSON.stringify(result)}`);
+      result = machine.emitEvent("switch");
+      console.log(`current state: ${JSON.stringify(result)}`);
+      console.log("🚀 ~ machine:", machine);
+    </script>
+  </body>
+</html>

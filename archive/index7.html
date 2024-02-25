@@ -1,0 +1,295 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Document</title>
+  </head>
+  <body style="background-color: black">
+    <script>
+      class StateMachine {
+        constructor(schema) {
+          this.schema = schema;
+          this.state = schema.initialState;
+          this.prevState = this.state;
+          this.debug = false;
+          this.debugId = null;
+          this.logDebug = this.logDebug.bind(this);
+        }
+
+        static priority = {
+          default: -1,
+          out: 0,
+          in: 1,
+        };
+
+        static getPriority(key) {
+          if (key in StateMachine.priority) {
+            return StateMachine.priority[key];
+          }
+          return StateMachine.priority.default;
+        }
+
+        static keys = {
+          in: "in",
+          out: "out",
+        };
+
+        static isInOut(value) {
+          Object.keys(StateMachine.keys).includes(value);
+        }
+
+        static getDeep(options = {}) {
+          const { target, path, fallback } = options;
+          const pathArray = Array.isArray(path)
+            ? path
+            : path.split(".").filter(Boolean);
+          const value = pathArray.reduce((acc, key) => acc && acc[key], target);
+
+          if (value === undefined && "fallback" in options) {
+            return fallback;
+          }
+          return value;
+        }
+
+        static setDeep(object, path, value) {
+          const pathArray = Array.isArray(path)
+            ? path
+            : path.split(".").filter(Boolean);
+          pathArray.reduce((acc, key, index) => {
+            const isNextKeyNumeric = /^\d+$/.test(pathArray[index + 1]);
+
+            if (index === pathArray.length - 1) {
+              acc[key] = value;
+            } else if (!acc[key] || typeof acc[key] !== "object") {
+              // non-object intermediate path items are overwritten
+              acc[key] = isNextKeyNumeric ? [] : {};
+            }
+
+            return acc[key];
+          }, object);
+
+          return object;
+        }
+
+        setDebug(isDebug, debugId) {
+          this.debug = isDebug;
+          this.debugId = debugId || Math.random().toString(16).slice(2, 6);
+
+          return this;
+        }
+
+        logDebug(...args) {
+          if (!this.debug) {
+            return;
+          }
+          console.debug(`[${this.debugId}]`, ...args);
+        }
+
+        getState() {
+          return {
+            state: this.state,
+            prevState: this.prevState,
+          };
+        }
+
+        getRequestResult(isChanged) {
+          const result = {
+            changed: isChanged,
+            state: this.state,
+            prevState: this.prevState,
+          };
+          this.logDebug(`request result is "${JSON.stringify(result)}"`);
+          return result;
+        }
+
+        requestState(transitionName) {
+          this.logDebug(
+            `requested state change on transition name "${transitionName}"`
+          );
+
+          if (StateMachine.isInOut(transitionName)) {
+            this.logDebug(
+              `transition "${transitionName}" is internal and can not be triggered directly; state "${this.state}" was not changed`
+            );
+            return this.getRequestResult(false);
+          }
+
+          // get config supported by state
+          const config = StateMachine.getDeep({
+            target: this.schema,
+            path: [this.state],
+            fallback: {},
+          });
+
+          const transition = config[transitionName];
+
+          // check if transition is predefined
+          if (!transition) {
+            // state is not changed
+            this.logDebug(
+              `transition "${transitionName}" is invalid; state "${this.state}" was not changed`
+            );
+            return this.getRequestResult(false);
+          }
+
+          this.prevState = this.state;
+          this.state = this.receiveState(transition);
+
+          // state changed
+          return this.getRequestResult(true);
+        }
+
+        receiveState(transition) {
+          const {
+            state: nextState,
+            // by default -1 priority
+            handlers: transitionHandlers,
+          } = transition;
+          const { state: currentState } = this;
+
+          // by default -0 priority
+          const currentStateOutHandler = StateMachine.getDeep({
+            target: this.schema,
+            path: [currentState, StateMachine.keys.out],
+            fallback: {},
+          });
+
+          // by default 1 priority
+          const nextStateInHandler = StateMachine.getDeep({
+            target: this.schema,
+            path: [nextState, StateMachine.keys.in],
+            fallback: {},
+          });
+
+          const handlers = [
+            transitionHandlers,
+            currentStateOutHandler,
+            nextStateInHandler,
+          ]
+            .reduce((acc, next) => {
+              if (!next) {
+                return acc;
+              }
+              if (Array.isArray(next)) {
+                acc.push(...next);
+              } else {
+                acc.push(next);
+              }
+              return acc;
+            }, [])
+            // sort in order of ascending of priority
+            .sort((a, b) => a.priority - b.priority);
+
+          this.logDebug(`state "${nextState}" has handlers:`, handlers);
+
+          handlers.forEach((handler) => {
+            handler.callback();
+          });
+
+          return nextState;
+        }
+
+        setStateInOutHandler(state, transition, callback, comment, priority) {
+          if (typeof callback !== "function") {
+            throw new Error(`callback "${callback}" for state is invalid`);
+          }
+
+          const commentNormalized = comment || `${state}-${transition}`;
+          const priorityNormalized =
+            typeof priority === "number"
+              ? priority
+              : StateMachine.getPriority(transition);
+
+          StateMachine.setDeep(
+            this.schema,
+            [state, StateMachine.keys[transition]],
+            {
+              callback,
+              comment: commentNormalized,
+              priority: priorityNormalized,
+            }
+          );
+        }
+
+        setStateInHandler(state, callback, comment, priority) {
+          return this.setStateInOutHandler(
+            state,
+            StateMachine.keys.in,
+            callback,
+            comment,
+            priority
+          );
+        }
+
+        setStateOutHandler(state, callback, comment, priority) {
+          return this.setStateInOutHandler(
+            state,
+            StateMachine.keys.out,
+            callback,
+            comment,
+            priority
+          );
+        }
+
+        setStateTransitionHandler(state) {}
+      }
+
+      const schema = {
+        initialState: "off",
+        off: {
+          switch: {
+            state: "on",
+            handlers: [
+              {
+                callback: () => {
+                  console.log('transition action for "switch" in "off" state');
+                },
+                comment: "off-switch-in",
+                priority: -1,
+              },
+            ],
+          },
+        },
+        on: {
+          switch: {
+            state: "off",
+            handlers: [
+              {
+                callback: () => {
+                  console.log('transition action for "switch" in "on" state');
+                },
+                comment: "on-switch-off",
+                priority: -1,
+              },
+            ],
+          },
+        },
+      };
+
+      const machine = new StateMachine(schema).setDebug(1, "TEST");
+
+      machine.setStateInHandler("off", () => {
+        console.log("off: onEnter");
+      });
+      machine.setStateOutHandler("off", () => {
+        console.log("off: onExit");
+      });
+
+      machine.setStateInHandler("on", () => {
+        console.log("on: onEnter");
+      });
+      machine.setStateOutHandler("on", () => {
+        console.log("on: onExit");
+      });
+
+      let result = machine.getState();
+      console.log(`current state: ${result.state}`);
+      result = machine.requestState("switch");
+      console.log(`current state: ${result.state}`);
+      result = machine.requestState("switch");
+      console.log(`current state: ${result.state}`);
+      console.log("🚀 ~ machine:", machine);
+    </script>
+  </body>
+</html>

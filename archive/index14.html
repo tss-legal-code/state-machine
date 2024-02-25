@@ -1,0 +1,384 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Document</title>
+  </head>
+  <body style="background-color: black">
+    <script>
+      class StateMachine {
+        constructor(options = {}) {
+          const {
+            schema = {},
+            name = Math.random().toString(16).slice(2, 6),
+            state = "idle",
+            debug = false,
+            isBasicEventsInitAllowed = false,
+            maxStatesLogLength = 1000,
+          } = options;
+          this.schema = schema;
+          this.name = name;
+          this.statesLog = [state];
+          this.debug = debug;
+          this.isBasicEventsInitAllowed = isBasicEventsInitAllowed;
+          this.maxStatesLogLength = maxStatesLogLength;
+          //
+          this.logDebug = this.debugLog.bind(this);
+          this.basicEvents = {
+            in: "in",
+            out: "out",
+          };
+          this.keys = {
+            handlers: "handlers",
+            state: "state",
+          };
+          this.eventPriorityMap = {
+            default: -1,
+            out: 0,
+            in: 1,
+          };
+        }
+
+        getState(fromEnd = 1) {
+          return this.statesLog[this.statesLog.length - fromEnd];
+        }
+
+        setState(value) {
+          this.statesLog.push(value);
+          if (this.statesLog.length > this.maxStatesLogLength) {
+            this.debugLog(`maxStatesLogLength reached, removing oldest record`);
+            this.statesLog.shift();
+          }
+          return value;
+        }
+
+        getPriority(eventName) {
+          if (eventName in this.eventPriorityMap) {
+            return this.eventPriorityMap[eventName];
+          }
+          return this.eventPriorityMap.default;
+        }
+
+        addStateHandler({
+          state,
+          eventName,
+          callback,
+          targetState,
+          priority,
+          comment,
+        } = {}) {
+          // normalize incomming arguments
+          if (!comment) {
+            comment = `${state}-${eventName}`;
+          }
+          if (!priority) {
+            priority = this.getPriority(eventName);
+          }
+
+          // compose new handler item
+          const handler = {
+            callback,
+            comment,
+            priority,
+          };
+
+          // deal with event name
+          if (eventName in this.basicEvents) {
+            eventName = this.basicEvents[eventName];
+          } else {
+            // store next state only for NOT basic events
+            const currentlyDefinedState = this.getDeep({
+              target: this.schema,
+              path: [state, eventName, this.keys.state],
+              fallback: null,
+            });
+
+            if (currentlyDefinedState) {
+              // to AVOID any confusion DO NOT CHANGE target state once it is defined
+              this.debugLog(
+                `IGNORING any target state change: try to change from "${currentlyDefinedState}" to "${targetState}"`
+              );
+            } else {
+              // ONLY once: store name of next/target/end/destination state
+              this.setDeep({
+                target: this.schema,
+                path: [state, eventName, this.keys.state],
+                value: targetState ? targetState : state,
+              });
+            }
+          }
+
+          // get existing array of handlers
+          const handlers = this.getDeep({
+            target: this.schema,
+            path: [state, eventName, this.keys.handlers],
+          });
+
+          if (handlers) {
+            // add handler to existing array
+            handlers.push(handler);
+          } else {
+            // create array of handlers with 1 item
+            this.setDeep({
+              target: this.schema,
+              path: [state, eventName, this.keys.handlers],
+              value: [handler],
+            });
+          }
+        }
+
+        removeStateHandler({ state, eventName, callback } = {}) {
+          const stateHandlers = this.getDeep({
+            target: this.schema,
+            path: [state, eventName, this.keys.handlers],
+            fallback: null,
+          });
+
+          if (stateHandlers) {
+            const index = stateHandlers.findIndex(
+              (item) => item.callback === callback
+            );
+            if (index !== -1) {
+              stateHandlers.splice(index, 1);
+            }
+          }
+        }
+
+        initState(eventName) {
+          let currentState = this.getState();
+          this.debugLog(`init "${eventName}" : "${currentState}" ==>> "?????"`);
+
+          // corner case
+          if (!this.isBasicEventsInitAllowed && eventName in this.basicEvents) {
+            this.debugLog(
+              `fail "${eventName}" : "${currentState}" ignores event "${eventName}" (unless "isBasicEventsInitAllowed" flag is true)`
+            );
+
+            return currentState;
+          }
+
+          // get config supported by state
+          const eventConfig = this.getDeep({
+            target: this.schema,
+            path: [currentState, eventName],
+          });
+
+          // check if event is defined
+          if (!eventConfig) {
+            // state is not changed
+            this.debugLog(
+              `fail "${eventName}" : "${currentState}" ignores event "${eventName}"`
+            );
+            return currentState;
+          }
+
+          const nextState = this.goToNextState(eventName, eventConfig);
+          this.setState(nextState);
+
+          // state changed
+          this.debugLog(
+            `done "${eventName}" : "${currentState}" ==>> "${nextState}"`
+          );
+          return nextState;
+        }
+
+        goToNextState(eventName, eventConfig) {
+          const {
+            state: nextState,
+            // by default -1 priority
+            handlers: eventHandlers,
+          } = eventConfig;
+          const currentState = this.getState();
+          // by default -0 priority
+          const currentStateOutHandler = this.getDeep({
+            target: this.schema,
+            path: [currentState, this.basicEvents.out, this.keys.handlers],
+            fallback: [],
+          });
+
+          // by default 1 priority
+          const nextStateInHandler = this.getDeep({
+            target: this.schema,
+            path: [nextState, this.basicEvents.in, this.keys.handlers],
+            fallback: [],
+          });
+          // debugger;
+          const handlers = [
+            eventHandlers,
+            currentStateOutHandler,
+            nextStateInHandler,
+          ]
+            .reduce((acc, next) => {
+              if (!next) {
+                return acc;
+              }
+              acc.push(...next);
+              return acc;
+            }, [])
+            // sort in order of ascending of priority
+            .sort((a, b) => a.priority - b.priority);
+
+          this.debugLog(
+            `pend "${eventName}" : "${currentState}" ==>> "${nextState}":`,
+            handlers
+          );
+
+          handlers.forEach((handler, index, array) => {
+            this.debugLog(
+              `exec ${(" ".repeat(3) + (index + 1)).slice(-2)} of ${(
+                " ".repeat(3) + array.length
+              ).slice(-2)}`,
+              `priority ${(" ".repeat(3) + handler.priority.toFixed(2)).slice(
+                -5
+              )}`,
+              `comment "${handler.comment}"`
+            );
+            handler.callback();
+          });
+
+          return nextState;
+        }
+
+        debugLog(...args) {
+          if (!this.debug) return;
+          console.debug(`[${this.name}]`, ...args);
+        }
+
+        getDeep(options = {}) {
+          const { target, path, fallback } = options;
+          const pathArray = Array.isArray(path)
+            ? path
+            : path.split(".").filter(Boolean);
+          const value = pathArray.reduce((acc, key) => acc && acc[key], target);
+
+          if (value === undefined && "fallback" in options) {
+            return fallback;
+          }
+          return value;
+        }
+
+        setDeep(options = {}) {
+          const { target, path, value } = options;
+          const pathArray = Array.isArray(path)
+            ? path
+            : path.split(".").filter(Boolean);
+          pathArray.reduce((acc, key, index) => {
+            const isNextKeyNumeric = /^\d+$/.test(pathArray[index + 1]);
+
+            if (index === pathArray.length - 1) {
+              acc[key] = value;
+            } else if (!acc[key] || typeof acc[key] !== "object") {
+              // non-object intermediate path items are overwritten
+              acc[key] = isNextKeyNumeric ? [] : {};
+            }
+
+            return acc[key];
+          }, target);
+
+          return target;
+        }
+      }
+
+      const machine = new StateMachine({
+        state: "off",
+        name: "FIRST",
+        debug: 1,
+      });
+
+      machine.addStateHandler({
+        state: "off",
+        eventName: "in",
+        callback: () => {
+          console.log("off: onEnter");
+        },
+      });
+      machine.addStateHandler({
+        state: "off",
+        eventName: "out",
+        callback: () => {
+          console.log("off: onExit");
+        },
+      });
+
+      machine.addStateHandler({
+        state: "off",
+        eventName: "switch",
+        callback: () => {
+          console.log('transition action for "switch" in "off" state');
+        },
+        comment: "off-switch-on",
+        targetState: "on",
+      });
+
+      machine.addStateHandler({
+        state: "on",
+        eventName: "in",
+        callback: () => {
+          console.log("on: onEnter");
+        },
+      });
+
+      machine.addStateHandler({
+        state: "on",
+        eventName: "in",
+        callback: () => {
+          console.log("on: onEnter");
+        },
+        priority: -5,
+      });
+
+      machine.addStateHandler({
+        state: "on",
+        eventName: "out",
+        callback: () => {
+          console.log("on: onExit");
+        },
+      });
+
+      machine.addStateHandler({
+        state: "on",
+        eventName: "switch",
+        callback: () => {
+          console.log('transition action for "switch" in "on" state');
+        },
+        comment: "on-switch-off",
+        targetState: "off",
+      });
+
+      const removableCallback = () => {
+        console.log('transition action for "switch" in "on" state 2');
+      };
+      machine.addStateHandler({
+        state: "on",
+        eventName: "switch",
+        callback: removableCallback,
+        comment: "on-switch-off",
+        targetState: "off",
+      });
+
+      machine.removeStateHandler({
+        state: "on",
+        eventName: "switch",
+        callback: removableCallback,
+      });
+
+      let result = machine.getState();
+      console.log(`current state: ${JSON.stringify(result)}`);
+      result = machine.initState("switch");
+      console.log(`current state: ${JSON.stringify(result)}`);
+      result = machine.initState("switch");
+      console.log(`current state: ${JSON.stringify(result)}`);
+      result = machine.initState("on");
+      result = machine.initState("off");
+      result = machine.initState("in");
+      result = machine.initState("out");
+      result = machine.initState("switch");
+      console.log(`current state: ${JSON.stringify(result)}`);
+      result = machine.initState("switch");
+      console.log(`current state: ${JSON.stringify(result)}`);
+      result = machine.initState("switch");
+      console.log("🚀 ~ machine:", machine);
+    </script>
+  </body>
+</html>

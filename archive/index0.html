@@ -1,0 +1,82 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Document</title>
+  </head>
+  <body>
+    <script>
+      function createMachine(map) {
+        const machine = {
+          state: map.initialState,
+          transition(state, event) {
+            const config = map[state];
+            const shift = config.shifts[event];
+
+            if (!shift) return;
+
+            const nextState = shift.state;
+            const nextConfig = map[nextState];
+
+            shift.action();
+            config.actions.onExit();
+            nextConfig.actions.onEnter();
+
+            machine.state = nextState;
+
+            return machine.state;
+          },
+        };
+        return machine;
+      }
+
+      const machine = createMachine({
+        initialState: "off",
+        off: {
+          actions: {
+            onEnter() {
+              console.log("off: onEnter");
+            },
+            onExit() {
+              console.log("off: onExit");
+            },
+          },
+          shifts: {
+            switch: {
+              state: "on",
+              action() {
+                console.log('transition action for "switch" in "off" state');
+              },
+            },
+          },
+        },
+        on: {
+          actions: {
+            onEnter() {
+              console.log("on: onEnter");
+            },
+            onExit() {
+              console.log("on: onExit");
+            },
+          },
+          shifts: {
+            switch: {
+              state: "off",
+              action() {
+                console.log('transition action for "switch" in "on" state');
+              },
+            },
+          },
+        },
+      });
+
+      let state = machine.state;
+      console.log(`current state: ${state}`);
+      state = machine.transition(state, "switch");
+      console.log(`current state: ${state}`);
+      state = machine.transition(state, "switch");
+      console.log(`current state: ${state}`);
+    </script>
+  </body>
+</html>

@@ -1,0 +1,227 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Document</title>
+  </head>
+  <body style="background-color: black">
+    <script>
+      class StateMachine {
+        constructor(schema) {
+          this.validateSchema(schema);
+          this.schema = schema;
+          this.state = schema.initialState;
+        }
+
+        static isObject(value) {
+          return value && typeof value === "object";
+        }
+
+        static isFunction(value) {
+          return typeof value === "object";
+        }
+
+        validateSchema(schema) {
+          if (!schema || !StateMachine.isObject(schema)) {
+            throw new Error("state machine received invalid schema", {
+              cause: schema,
+            });
+          }
+        }
+
+        getStateConfig(state) {
+          if (StateMachine.isObject(this.schema[state])) {
+            return this.schema[state];
+          }
+          return {};
+        }
+
+        getStateEvents(state) {
+          const config = this.getStateConfig(state);
+          if (StateMachine.isObject(config.events)) {
+            return config.events;
+          }
+          return [];
+        }
+
+        requestState(eventName) {
+          // get events supported by state
+          const events = this.getStateEvents(this.state);
+          const event = events[eventName];
+
+          // check if event is predefined
+          if (!this.isEventValid(event)) {
+            // state is not changed
+            return false;
+          }
+
+          this.state = this.receiveState(event);
+
+          // state changed
+          return true;
+        }
+
+        getStateInOutHandler(state, key) {
+          const config = this.getStateConfig(state);
+
+          if (
+            ["in", "out"].includes(key) &&
+            StateMachine.isObject(config.io) &&
+            StateMachine.isFunction(config.io[key])
+          ) {
+            return config.io[key];
+          }
+          return null;
+        }
+
+        isEventValid(event) {
+          const result =
+            StateMachine.isObject(event) &&
+            this.getEventState(event) &&
+            this.getEventHandlers(event);
+          return result;
+        }
+
+        getEventState(event) {
+          return event.state;
+        }
+
+        getEventHandlers(event) {
+          if (event.handlers && Array.isArray(event.handlers)) {
+            return event.handlers;
+          }
+          return null;
+        }
+
+        receiveState(event) {
+          const state = this.getEventState(event);
+          // by default -1 priority
+          const eventHandlers = this.getEventHandlers(event);
+          // by default -0 priority
+          const stateOutHandler = this.getStateInOutHandler(this.state, "out");
+          // by default 1 priority
+          const stateInHandler = this.getStateInOutHandler(state, "in");
+
+          const transitionHandlers = [
+            ...(eventHandlers || []),
+            ...([stateOutHandler] || []),
+            ...([stateInHandler] || []),
+          ]
+            // sort in order of ascending priority
+            .sort((a, b) => a.priority - b.priority)
+            .forEach((handler) => {
+              handler.callback();
+            });
+
+          return state;
+        }
+      }
+
+      const schema = {
+        initialState: "off",
+        off: {
+          io: {
+            out: {
+              callback: () => {
+                console.log("off: onExit");
+              },
+              priority: 0,
+            },
+            in: {
+              callback: () => {
+                console.log("off: onEnter");
+              },
+              priority: 1,
+            },
+          },
+          events: {
+            switch: {
+              state: "on",
+              handlers: [
+                {
+                  callback: () => {
+                    console.log(
+                      'transition action for "switch" in "off" state'
+                    );
+                  },
+                  priority: -1,
+                },
+              ],
+            },
+          },
+        },
+        on: {
+          io: {
+            out: {
+              callback: () => {
+                console.log("on: onExit");
+              },
+              priority: 0,
+            },
+            in: {
+              callback: () => {
+                console.log("on: onEnter");
+              },
+              priority: 1,
+            },
+          },
+          events: {
+            switch: {
+              state: "off",
+              handlers: [
+                {
+                  callback: () => {
+                    console.log('transition action for "switch" in "on" state');
+                  },
+                  priority: -1,
+                },
+              ],
+            },
+          },
+        },
+      };
+
+      // function createMachine(schema) {
+      //   const machine = {
+      //     state: schema.initialState,
+      //     switch(eventName) {
+      //       const activeConfig = schema[this.state];
+      //       const event = activeConfig.events[eventName];
+
+      //       if (!event) return;
+
+      //       const nextState = event.state;
+      //       const nextConfig = schema[nextState];
+
+      //       event.handlers.forEach((handler) => {
+      //         handler.callback();
+      //       });
+      //       activeConfig.io.out();
+      //       nextConfig.io.in();
+
+      //       machine.state = nextState;
+
+      //       return machine.state;
+      //     },
+      //   };
+      //   return machine;
+      // }
+      // const machine = createMachine(schema);
+      // let state = machine.state;
+      // console.log(`current state: ${state}`);
+      // state = machine.switch("switch");
+      // console.log(`current state: ${state}`);
+      // state = machine.switch("switch");
+      // console.log(`current state: ${state}`);
+
+      const machine = new StateMachine(schema);
+      let state = machine.state;
+      console.log(`current state: ${state}`);
+      state = machine.requestState("switch");
+      console.log(`current state: ${state}`);
+      state = machine.requestState("switch");
+      console.log(`current state: ${state}`);
+    </script>
+  </body>
+</html>
